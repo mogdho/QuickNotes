@@ -26,7 +26,7 @@ Then just paste (`Ctrl + V`) wherever you want.
 | Pop-up | Meaning |
 |:--|:--|
 | **Reading text...** | Gemini is reading your selection |
-| **Copied** | ✅ Done: the text is on your clipboard |
+| **Copied** | ✅ Done: the text is on your clipboard (with a soft sound, unless you turned it off) |
 | **No text found** | Gemini found no text in your selection |
 
 > 🛡️ Your clipboard is only changed when the text was read successfully. Cancel or an error? **What you had copied stays.**
@@ -73,7 +73,7 @@ The first time you start QuickNotes, a small **setup window** opens by itself:
 Right-click the tray icon:
 
 <p align="center">
-  <img src="assets/tray.svg" width="90%" alt="Tray menu with Scan text on screen, Pause, Start with Windows, Change Gemini API key and Exit">
+  <img src="assets/tray.svg" width="90%" alt="Tray menu with Scan text on screen, Pause, Start with Windows, Sound when copied, Change Gemini API key and Exit">
 </p>
 
 | Option | What it does |
@@ -81,6 +81,7 @@ Right-click the tray icon:
 | **Scan text on screen** | Same as double-tapping Right Alt. *Tip: double-click the tray icon to do this.* |
 | **Pause** | Right Alt goes back to completely normal until you resume. The icon fades. |
 | **Start with Windows** | Starts QuickNotes automatically when you log in. Click again to turn it off. |
+| **Sound when copied** | A soft Windows notification sound when the text lands on your clipboard, so you know it's ready without looking. On by default. |
 | **Change Gemini API key** | Paste a new key |
 | **Exit** | Closes QuickNotes |
 
@@ -112,7 +113,8 @@ flowchart TD
 
 - **Built for smoothness:** nothing animates while you wait, and each mouse move only redraws your selection box, paced to your monitor's refresh rate (under 1 ms of work on a 2560×1600 screen). Works on every monitor, at any display scaling.
 - **No files:** nothing is saved to disk, and the picture never touches your clipboard.
-- Tries `gemini-flash-lite-latest` first, then `gemini-flash-latest` if that fails.
+- **Fast answers:** QuickNotes connects to Google while you're still dragging, keeps that connection open between scans, and asks Gemini to skip "thinking" (reading text doesn't need it). A typical scan takes about 2 seconds.
+- Tries `gemini-flash-lite-latest` first, then `gemini-flash-latest`. If Google is briefly overloaded, it waits a moment and tries again.
 
 ---
 

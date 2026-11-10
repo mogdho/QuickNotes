@@ -30,6 +30,7 @@ DoubleTapTime := 350        ; max ms between the two taps
 
 AppName      := "QuickNotes"
 DataDir      := A_AppData "\QuickNotes"
+SettingsFile := DataDir "\settings.ini"         ; Tray options (e.g. sound on/off)
 KeyFile      := DataDir "\gemini-key.txt"       ; Encrypted for your Windows account only
 IsPaused     := false
 DownTime     := 0
@@ -114,6 +115,7 @@ ScanOnce() {
 
     ; Our own scan screen: dims, you drag over the text. The clipboard is only
     ; touched at the very end, after the text was read successfully.
+    WarmUp(key)                              ; connect to Google while you drag
     try png := ScanOverlay().Run()
     catch as e {
         png := 0
@@ -144,44 +146,123 @@ ScanOnce() {
         return
     }
     A_Clipboard := text
+    if SoundOn()
+        PlayCopiedSound()
     Notify("Copied")
 }
 
 ; Sends the picture to Gemini and returns {text, error}
 AskGemini(png, key) {
+    ; Reading text is easy, so ask Gemini to think as little as possible.
+    ; Models accept different settings, so try the lightest first and step up
+    ; only if Google refuses it. What worked is remembered for the next scans.
+    static thinking := ['{"thinkingLevel":"minimal"}', '{"thinkingLevel":"low"}', '{"thinkingBudget":0}', ""]
+    static works := Map()                     ; model -> index in `thinking` that Google accepted
     prompt := "Transcribe all the text in this image exactly as written, in its original language and script "
         . "(for example Bangla or English). Keep the line breaks. Do not translate, correct, explain or add anything. "
         . "Output only the text. If there is no text, output nothing."
-    body := '{"contents":[{"parts":[{"inline_data":{"mime_type":"image/png","data":"' Base64Encode(png)
-        . '"}},{"text":"' prompt '"}]}]}'
+    contents := '{"contents":[{"parts":[{"inline_data":{"mime_type":"image/png","data":"' Base64Encode(png)
+        . '"}},{"text":"' prompt '"}]}]'
 
     lastErr := "Unknown error"
     for model in StrSplit(Models, ",") {
-        try {
-            req := ComObject("WinHttp.WinHttpRequest.5.1")
-            req.Open("POST", "https://generativelanguage.googleapis.com/v1beta/models/" Trim(model) ":generateContent", true)
-            req.SetTimeouts(10000, 10000, 30000, 60000)
-            req.SetRequestHeader("Content-Type", "application/json; charset=utf-8")
-            req.SetRequestHeader("x-goog-api-key", key)
-            req.Send(body)
-            ; Wait without freezing the script (tray menu and hotkeys keep working)
-            start := A_TickCount
-            while !req.WaitForResponse(0) {
-                if (A_TickCount - start > 60000) {
-                    req.Abort()
-                    throw Error("Gemini took too long to answer.")
-                }
-                Sleep(50)
+        model := Trim(model)
+        url := "https://generativelanguage.googleapis.com/v1beta/models/" model ":generateContent"
+        i := works.Has(model) ? works[model] : 1
+        retried := false
+        loop {
+            cfg := thinking[i]
+            body := contents (cfg != "" ? ',"generationConfig":{"thinkingConfig":' cfg '}' : "") "}"
+            try r := PostJson(url, key, body)
+            catch as e {
+                lastErr := e.Message
+                break
             }
-            response := ResponseText(req)
-            if (req.Status = 200)
-                return {text: JsonTextParts(response), error: ""}
-            lastErr := "HTTP " req.Status ": " response
-        } catch as e {
-            lastErr := e.Message
+            if (r.status = 200) {
+                works[model] := i
+                return {text: JsonTextParts(r.body), error: ""}
+            }
+            lastErr := "HTTP " r.status ": " r.body
+            if InStr(r.body, "API_KEY_INVALID") || InStr(r.body, "API key not valid")
+                return {text: "", error: lastErr}            ; wrong key: no point trying anything else
+            if (r.status = 400 && i < thinking.Length) {       ; setting refused: try the next one
+                i += 1
+                continue
+            }
+            if (r.status >= 500 && !retried) {               ; Google busy: wait a moment, try once more
+                retried := true
+                Sleep(1500)
+                continue
+            }
+            break                                            ; e.g. bad key or free limit: next model
         }
     }
     return {text: "", error: lastErr}
+}
+
+; One connection to Google, kept alive between requests: every request after
+; the first skips the secure handshake (about 0.1-0.3 s)
+Http() {
+    static req := ComObject("WinHttp.WinHttpRequest.5.1")
+    return req
+}
+
+; Opens the connection while you're still dragging, so the real request doesn't
+; wait for the handshake. Free: it only lists models, it doesn't read anything.
+WarmUp(key) {
+    try {
+        r := Http()
+        r.Open("GET", "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", true)
+        r.SetRequestHeader("x-goog-api-key", key)
+        r.Send()
+    }
+}
+
+; Waits (without freezing) until the shared connection finished its last request
+WaitIdle(r, maxMs := 3000) {
+    start := A_TickCount
+    try while !r.WaitForResponse(0) {
+        if (A_TickCount - start > maxMs) {
+            r.Abort()
+            return
+        }
+        Sleep(20)
+    }
+}
+
+; POSTs JSON on the shared connection and returns {status, body}
+PostJson(url, key, body) {
+    r := Http()
+    WaitIdle(r)
+    r.Open("POST", url, true)
+    r.SetTimeouts(10000, 10000, 30000, 60000)
+    r.SetRequestHeader("Content-Type", "application/json; charset=utf-8")
+    r.SetRequestHeader("x-goog-api-key", key)
+    r.Send(body)
+    ; Wait without freezing the script (tray menu and hotkeys keep working)
+    start := A_TickCount
+    while !r.WaitForResponse(0) {
+        if (A_TickCount - start > 60000) {
+            r.Abort()
+            throw Error("Gemini took too long to answer.")
+        }
+        Sleep(20)
+    }
+    return {status: r.Status, body: ResponseText(r)}
+}
+
+; ---- "Sound when copied" (tray option, on by default) ----
+SoundOn() => IniRead(SettingsFile, "Options", "SoundWhenCopied", "1") = "1"
+
+ToggleSound(*) {
+    IniWrite(SoundOn() ? "0" : "1", SettingsFile, "Options", "SoundWhenCopied")
+    UpdateTray()
+}
+
+; Windows' own soft notification sound (falls back to the system "information" sound)
+PlayCopiedSound() {
+    f := A_WinDir "\Media\Windows Notify System Generic.wav"
+    try SoundPlay(FileExist(f) ? f : "*64")
 }
 
 ; Reads the reply as UTF-8 (so Bangla and other scripts come through correctly)
@@ -759,6 +840,7 @@ SetupTray() {
     tray.Add()
     tray.Add("Pause", TogglePause)
     tray.Add("Start with Windows", ToggleStartup)
+    tray.Add("Sound when copied", ToggleSound)
     tray.Add("Change Gemini API key", (*) => KeySetup.Ask(LoadKey() != "" ? "change" : "first"))
     tray.Add()
     tray.Add("Exit", (*) => ExitApp())
@@ -778,6 +860,10 @@ UpdateTray() {
         A_TrayMenu.Check("Start with Windows")
     else
         A_TrayMenu.Uncheck("Start with Windows")
+    if SoundOn()
+        A_TrayMenu.Check("Sound when copied")
+    else
+        A_TrayMenu.Uncheck("Sound when copied")
 }
 
 StartupTaskName() => AppName " (AutoHotkey)"
