@@ -482,8 +482,48 @@ class ScanOverlay {
     OnSetCursor(wParam, lParam, msg, hwnd) {
         if !this.Mine(hwnd)
             return
-        DllCall("SetCursor", "ptr", DllCall("LoadCursor", "ptr", 0, "ptr", 32515, "ptr"))   ; crosshair
+        cur := ScanOverlay.MakeCursor(this.s)
+        DllCall("SetCursor", "ptr", cur ? cur : DllCall("LoadCursor", "ptr", 0, "ptr", 32515, "ptr"))
         return 1
+    }
+
+    ; A "+" cursor that stays visible on any background: white lines with a thin
+    ; dark outline. (Windows' own crosshair inverts the colours under it, so on
+    ; the 50% dimmed screen it turns the same grey as the background.)
+    static MakeCursor(s) {
+        static cache := Map()
+        if cache.Has(s)
+            return cache[s]
+        n := Max(32, Round(32 * s / 2) * 2)          ; cursor size (even), follows display scaling
+        c := n // 2                                  ; hotspot = the centre
+        L := Round(11 * s)                           ; arm length
+        t := Max(2, Round(1.5 * s))                  ; white line thickness
+        o := Max(1, Round(0.75 * s))                 ; dark outline around it
+        y0 := c - t // 2
+        DllCall("gdiplus\GdipCreateBitmapFromScan0", "int", n, "int", n, "int", 0, "int", 0x26200A, "ptr", 0, "ptr*", &bmp := 0)
+        DllCall("gdiplus\GdipGetImageGraphicsContext", "ptr", bmp, "ptr*", &g := 0)
+        DllCall("gdiplus\GdipGraphicsClear", "ptr", g, "uint", 0)
+        DllCall("gdiplus\GdipCreateSolidFill", "uint", 0xE6000000, "ptr*", &dark := 0)
+        DllCall("gdiplus\GdipCreateSolidFill", "uint", 0xFFFFFFFF, "ptr*", &light := 0)
+        for pass in [[dark, o], [light, 0]] {        ; outline first, white on top
+            br := pass[1], e := pass[2]
+            DllCall("gdiplus\GdipFillRectangleI", "ptr", g, "ptr", br, "int", c - L - e, "int", y0 - e, "int", 2 * L + 2 * e, "int", t + 2 * e)
+            DllCall("gdiplus\GdipFillRectangleI", "ptr", g, "ptr", br, "int", y0 - e, "int", c - L - e, "int", t + 2 * e, "int", 2 * L + 2 * e)
+        }
+        DllCall("gdiplus\GdipCreateHICONFromBitmap", "ptr", bmp, "ptr*", &hIcon := 0)
+        DllCall("gdiplus\GdipDeleteBrush", "ptr", dark), DllCall("gdiplus\GdipDeleteBrush", "ptr", light)
+        DllCall("gdiplus\GdipDeleteGraphics", "ptr", g), DllCall("gdiplus\GdipDisposeImage", "ptr", bmp)
+        if !hIcon
+            return cache[s] := 0
+        ; Turn the icon into a cursor whose click point is the centre of the "+"
+        ii := Buffer(A_PtrSize = 8 ? 32 : 20, 0)
+        DllCall("GetIconInfo", "ptr", hIcon, "ptr", ii)
+        NumPut("int", 0, "uint", c, "uint", c, ii)  ; fIcon = FALSE (cursor), hotspot x, y
+        hCur := DllCall("CreateIconIndirect", "ptr", ii, "ptr")
+        mo := A_PtrSize = 8 ? 16 : 12
+        DllCall("DeleteObject", "ptr", NumGet(ii, mo, "ptr")), DllCall("DeleteObject", "ptr", NumGet(ii, mo + A_PtrSize, "ptr"))
+        DllCall("DestroyIcon", "ptr", hIcon)
+        return cache[s] := hCur
     }
     OnLDown(wParam, lParam, msg, hwnd) {
         if !this.Mine(hwnd)
@@ -662,7 +702,7 @@ class KeySetup {
 
     Run(mode) {
         this.result := ""
-        g := Gui("+AlwaysOnTop -MinimizeBox", "QuickNotes setup")
+        g := Gui("-MinimizeBox", "QuickNotes setup")   ; NOT always-on-top: the browser must be able to come forward
         g.BackColor := "FFFFFF", g.MarginX := 22, g.MarginY := 18
         g.SetFont("s14 bold c111827", "Segoe UI")
         g.AddText("w420", mode = "first" ? "Set up QuickNotes" : "Change your Gemini key")
@@ -676,11 +716,13 @@ class KeySetup {
         g.AddButton("xm+20 y+6 w170 h30", "Open AI Studio  ↗").OnEvent("Click", (*) => Run("https://aistudio.google.com/apikey"))
         g.SetFont("bold")
         g.AddText("xm w420 y+14", "2.  Click " Chr(0x201C) "Create API key" Chr(0x201D) " and copy it")
-        g.AddText("w420 y+12", "3.  Paste it here")
+        g.AddText("w420 y+12", "3.  Paste it here and click Test")
         g.SetFont("norm")
+        this.tested := ""                     ; the key Google confirmed (Save only works for this one)
         this.edit := g.AddEdit("xm+20 y+6 w318 h28 -Wrap")
-        this.pasteBtn := g.AddButton("x+8 yp w74 h28", "Paste")
-        this.pasteBtn.OnEvent("Click", (*) => this.Fill(A_Clipboard, true))
+        this.edit.OnEvent("Change", (*) => this.OnEdit())
+        this.testBtn := g.AddButton("x+8 yp w74 h28 Default", "Test")
+        this.testBtn.OnEvent("Click", (*) => this.Test())
         this.status := g.AddText("xm+20 y+8 w400 h20 c6B7280"
             , mode = "invalid" ? "Your saved key stopped working. Paste a new one."
             : mode = "change"  ? "A key is already saved. Paste a new one to replace it."
@@ -689,7 +731,7 @@ class KeySetup {
         g.AddText("xm w420 y+12", "Only the area you select when scanning is sent to Google. "
             . "Your key is stored encrypted, for your Windows account only.")
         g.SetFont("s10 c111827")
-        this.saveBtn := g.AddButton("xm+234 y+16 w90 h32 Default", "Save")
+        this.saveBtn := g.AddButton("xm+234 y+16 w90 h32 Disabled", "Save")   ; grey until the key passes the test
         this.saveBtn.OnEvent("Click", (*) => this.Save())
         this.cancelBtn := g.AddButton("x+8 yp w90 h32", "Cancel")
         this.cancelBtn.OnEvent("Click", (*) => g.Destroy())
@@ -704,23 +746,42 @@ class KeySetup {
         if (mode = "first")
             this.Fill(A_Clipboard, false)     ; maybe it's already copied
         g.Show("AutoSize")
+        try WinActivate("ahk_id " g.Hwnd)    ; open in front (once), then behave like a normal window
         WinWaitClose("ahk_id " g.Hwnd)
         OnClipboardChange(clipWatch, 0)
         return this.result
     }
 
-    ; Gemini keys look like "AIza" + 35 letters/digits
+    ; Gemini keys look like "AIza" + 35 letters/digits. Fills the box when the key is copied.
     Fill(text, manual) {
         t := Trim(text, " `t`r`n")
         if RegExMatch(t, "^AIza[\w-]{30,}$") {
             this.edit.Value := t
-            this.Say("✓ Found your key. Click Save.", "16A34A")
-        } else if manual {
-            if (t = "")
-                this.Say("Your clipboard is empty. Copy the key in AI Studio first.", "DC2626")
-            else
-                this.edit.Value := t
+            this.OnEdit()
+            this.Say("Key pasted. Click Test to check it.", "2563EB")
+            try WinActivate("ahk_id " this.gui.Hwnd)  ; key copied in the browser -> come back to the front
+            try this.testBtn.Focus()
         }
+    }
+
+    ; The key changed: it has to be tested (again) before it can be saved
+    OnEdit() {
+        ok := this.tested != "" && RegExReplace(this.edit.Value, "\s") = this.tested
+        this.saveBtn.Enabled := ok
+        if !ok {
+            this.saveBtn.Opt("-Default"), this.testBtn.Opt("+Default")
+            if (this.tested != "") {
+                this.tested := ""
+                this.Say("Key changed. Click Test to check it again.", "6B7280")
+            }
+        }
+    }
+
+    ; Disables everything while testing; afterwards Save is only enabled for a tested key
+    Lock(busy) {
+        for c in [this.edit, this.testBtn, this.cancelBtn]
+            c.Enabled := !busy
+        this.saveBtn.Enabled := !busy && this.tested != "" && RegExReplace(this.edit.Value, "\s") = this.tested
     }
 
     OnClip(type) {
@@ -733,27 +794,40 @@ class KeySetup {
         this.status.Value := text
     }
 
-    Save() {
+    ; Checks the key with Google. The window stays open; Save turns on only if it works.
+    Test() {
         key := RegExReplace(this.edit.Value, "\s")
         if (key = "") {
             this.Say("Paste your key first.", "DC2626")
+            this.edit.Focus()
             return
         }
-        for c in [this.saveBtn, this.cancelBtn, this.pasteBtn, this.edit]
-            c.Enabled := false
+        this.tested := ""
+        this.Lock(true)
         this.Say("Checking the key with Google...", "6B7280")
         r := TestKey(key)
-        if (r = "ok" || r = "offline") {
-            SaveKey(key)
-            this.result := key
-            this.gui.Destroy()
-            Notify(r = "ok" ? "Key works - saved" : "Key saved (couldn't test it: no internet)")
+        if (r = "ok") {
+            this.tested := key
+            this.Lock(false)
+            this.testBtn.Opt("-Default"), this.saveBtn.Opt("+Default")
+            this.Say("✓ Key works. Click Save to finish.", "16A34A")
+            this.saveBtn.Focus()
             return
         }
-        for c in [this.saveBtn, this.cancelBtn, this.pasteBtn, this.edit]
-            c.Enabled := true
-        this.Say("✗ " r, "DC2626")
+        this.Lock(false)
+        this.Say(r = "offline" ? "✗ Couldn't reach Google. Check your internet and test again." : "✗ " r, "DC2626")
         this.edit.Focus()
+    }
+
+    ; Saves the key that passed the test
+    Save() {
+        key := RegExReplace(this.edit.Value, "\s")
+        if (this.tested = "" || key != this.tested)
+            return                            ; (button is grey in this case anyway)
+        SaveKey(key)
+        this.result := key
+        this.gui.Destroy()
+        Notify("Key saved")
     }
 }
 

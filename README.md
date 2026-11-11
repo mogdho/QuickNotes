@@ -59,8 +59,9 @@ QuickNotes uses Google Gemini to read text, which is why it understands Bangla a
 The first time you start QuickNotes, a small **setup window** opens by itself:
 
 1. Click **Open AI Studio** and sign in with your Google account.
-2. Click **Create API key** → **Copy**. The key appears in the QuickNotes window **by itself** (or click **Paste**).
-3. Click **Save**. QuickNotes checks the key with Google first: **✓ works** → saved. A typo? It tells you right away.
+2. Click **Create API key** → **Copy**. The key appears in the QuickNotes window **by itself**, and the window comes back to the front (or paste it with `Ctrl + V`).
+3. Click **Test**. QuickNotes checks the key with Google: **✓ Key works** → the grey **Save** button turns on. A typo? It tells you right away, and Save stays off.
+4. Click **Save**. Done!
 
 > 🔒 Your key is **encrypted** with your Windows account, so only you, on this PC, can read it.
 >
