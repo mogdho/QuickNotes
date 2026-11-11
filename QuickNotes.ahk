@@ -50,7 +50,7 @@ if (LoadKey() = "")
 
 FirstRun() {
     if (KeySetup.Ask("first") != "")
-        TrayTip("Double-tap Right Alt, then drag over any text`nto copy it - in any language.", "QuickNotes is ready")
+        ShowHowTo(true)                      ; teach the Right Alt double-tap right away
     else
         TrayTip("QuickNotes needs a free Gemini key to work.`nDouble-tap Right Alt to set it up.", "QuickNotes")
 }
@@ -141,6 +141,9 @@ ScanOnce() {
     }
 
     text := Trim(result.text, " `t`r`n")
+    ; Gemini sometimes wraps the answer in Markdown fences (```text ... ```): remove them
+    if RegExMatch(text, "s)^``````[^\r\n]*\R(.*?)\R?``````$", &fence)
+        text := Trim(fence[1], " `t`r`n")
     if (text = "") {
         Notify("No text found")
         return
@@ -164,40 +167,123 @@ AskGemini(png, key) {
     contents := '{"contents":[{"parts":[{"inline_data":{"mime_type":"image/png","data":"' Base64Encode(png)
         . '"}},{"text":"' prompt '"}]}]'
 
-    lastErr := "Unknown error"
-    for model in StrSplit(Models, ",") {
-        model := Trim(model)
-        url := "https://generativelanguage.googleapis.com/v1beta/models/" model ":generateContent"
-        i := works.Has(model) ? works[model] : 1
-        retried := false
-        loop {
-            cfg := thinking[i]
-            body := contents (cfg != "" ? ',"generationConfig":{"thinkingConfig":' cfg '}' : "") "}"
-            try r := PostJson(url, key, body)
-            catch as e {
-                lastErr := e.Message
-                break
-            }
-            if (r.status = 200) {
-                works[model] := i
-                return {text: JsonTextParts(r.body), error: ""}
-            }
-            lastErr := "HTTP " r.status ": " r.body
-            if InStr(r.body, "API_KEY_INVALID") || InStr(r.body, "API key not valid")
-                return {text: "", error: lastErr}            ; wrong key: no point trying anything else
-            if (r.status = 400 && i < thinking.Length) {       ; setting refused: try the next one
-                i += 1
+    ; Speed plan: ask the first model. If it hasn't answered after HedgeAfter ms
+    ; (or it fails), ask the backup model too and take whichever answers first.
+    ; Never wait longer than MaxWait ms in total.
+    static HedgeAfter := 6000, MaxWait := 25000
+    modelList := StrSplit(Models, ",")      ; (not "models": AutoHotkey names ignore case, it would hide Models)
+    attempts := []
+    start := A_TickCount
+    WaitIdle(Http())                          ; the warm-up is quick; never wait long for it
+    GeminiSend(attempts, Trim(modelList[1]), Http(), contents, key, works, thinking)
+    errs := []
+    loop {
+        ; Start the backup model when the first one is slow or has failed
+        if (attempts.Length < modelList.Length && attempts.Length < 2)
+            && (A_TickCount - start > HedgeAfter || attempts[1].state = "failed")
+            GeminiSend(attempts, Trim(modelList[2]), ComObject("WinHttp.WinHttpRequest.5.1"), contents, key, works, thinking)
+
+        for a in attempts {
+            r := GeminiCheck(a, contents, key, works, thinking)
+            if (r = "")
                 continue
+            if r.HasOwnProp("text") {                     ; got the text: stop the other request
+                for other in attempts
+                    if (ObjPtr(other) != ObjPtr(a))
+                        try other.req.Abort()
+                return {text: r.text, error: ""}
             }
-            if (r.status >= 500 && !retried) {               ; Google busy: wait a moment, try once more
-                retried := true
-                Sleep(1500)
-                continue
+            errs.Push(r.error)
+            if r.HasOwnProp("fatal") {                    ; wrong key: no point trying anything else
+                for other in attempts
+                    try other.req.Abort()
+                return {text: "", error: r.error}
             }
-            break                                            ; e.g. bad key or free limit: next model
         }
+
+        allFailed := attempts.Length >= Min(2, modelList.Length)
+        for a in attempts
+            if (a.state != "failed")
+                allFailed := false
+        if allFailed
+            break
+        if (A_TickCount - start > MaxWait) {
+            for a in attempts
+                try a.req.Abort()
+            errs.Push("Gemini took too long to answer. Please try again.")
+            break
+        }
+        Sleep(20)                                         ; keeps the tray menu and hotkeys responsive
     }
-    return {text: "", error: lastErr}
+    ; Prefer the most useful message (e.g. the free limit) over a generic one
+    for e in errs
+        if InStr(e, "RESOURCE_EXHAUSTED") || InStr(e, "429")
+            return {text: "", error: e}
+    return {text: "", error: errs.Length ? errs[errs.Length] : "Unknown error"}
+}
+
+; Starts (or restarts) one request to `model` and adds it to `attempts`
+GeminiSend(attempts, model, req, contents, key, works, thinking, a := "") {
+    if (a = "") {
+        a := {model: model, req: req, i: works.Has(model) ? works[model] : 1, retried: false, state: "", retryAt: 0}
+        attempts.Push(a)
+    }
+    cfg := thinking[a.i]
+    body := contents (cfg != "" ? ',"generationConfig":{"thinkingConfig":' cfg '}' : "") "}"
+    try {
+        a.req.Open("POST", "https://generativelanguage.googleapis.com/v1beta/models/" a.model ":generateContent", true)
+        a.req.SetTimeouts(5000, 5000, 15000, 25000)
+        a.req.SetRequestHeader("Content-Type", "application/json; charset=utf-8")
+        a.req.SetRequestHeader("x-goog-api-key", key)
+        a.req.Send(body)
+        a.state := "running"
+    } catch as e {
+        a.state := "failed", a.lastError := e.Message
+    }
+    return a
+}
+
+; Looks at one request without waiting. Returns "" (nothing new), {text} or {error[, fatal]}
+GeminiCheck(a, contents, key, works, thinking) {
+    if (a.state = "waiting" && A_TickCount >= a.retryAt) {     ; Google was busy: try again now
+        GeminiSend("", a.model, a.req, contents, key, works, thinking, a)
+        return ""
+    }
+    if (a.state = "failed" && a.HasOwnProp("lastError")) {
+        err := a.lastError, a.DeleteProp("lastError")
+        return {error: err}
+    }
+    if (a.state != "running")
+        return ""
+    try {
+        if !a.req.WaitForResponse(0)
+            return ""
+        status := a.req.Status, body := ResponseText(a.req)
+    } catch as e {                                            ; network error
+        a.state := "failed"
+        return {error: e.Message}
+    }
+    if (status = 200) {
+        works[a.model] := a.i
+        a.state := "done"
+        return {text: JsonTextParts(body)}
+    }
+    err := "HTTP " status ": " body
+    if InStr(body, "API_KEY_INVALID") || InStr(body, "API key not valid") {
+        a.state := "failed"
+        return {error: err, fatal: true}
+    }
+    if (status = 400 && a.i < thinking.Length) {              ; thinking setting refused: try the next one
+        a.i += 1
+        GeminiSend("", a.model, a.req, contents, key, works, thinking, a)
+        return ""
+    }
+    if (status >= 500 && !a.retried) {                         ; Google busy: one retry after a moment
+        a.retried := true, a.state := "waiting", a.retryAt := A_TickCount + 1000
+        return ""
+    }
+    a.state := "failed"
+    return {error: err}
 }
 
 ; One connection to Google, kept alive between requests: every request after
@@ -208,47 +294,26 @@ Http() {
 }
 
 ; Opens the connection while you're still dragging, so the real request doesn't
-; wait for the handshake. Free: it only lists models, it doesn't read anything.
-WarmUp(key) {
+; wait for the handshake. A tiny GET that sends no key. (Not HEAD: after a HEAD,
+; WinHTTP returns an empty body for the next reply on the same connection.)
+WarmUp(key := "") {
     try {
         r := Http()
-        r.Open("GET", "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", true)
-        r.SetRequestHeader("x-goog-api-key", key)
+        r.Open("GET", "https://generativelanguage.googleapis.com/", true)
         r.Send()
     }
 }
 
 ; Waits (without freezing) until the shared connection finished its last request
-WaitIdle(r, maxMs := 3000) {
+WaitIdle(r, maxMs := 1000) {
     start := A_TickCount
     try while !r.WaitForResponse(0) {
         if (A_TickCount - start > maxMs) {
             r.Abort()
             return
         }
-        Sleep(20)
+        Sleep(10)
     }
-}
-
-; POSTs JSON on the shared connection and returns {status, body}
-PostJson(url, key, body) {
-    r := Http()
-    WaitIdle(r)
-    r.Open("POST", url, true)
-    r.SetTimeouts(10000, 10000, 30000, 60000)
-    r.SetRequestHeader("Content-Type", "application/json; charset=utf-8")
-    r.SetRequestHeader("x-goog-api-key", key)
-    r.Send(body)
-    ; Wait without freezing the script (tray menu and hotkeys keep working)
-    start := A_TickCount
-    while !r.WaitForResponse(0) {
-        if (A_TickCount - start > 60000) {
-            r.Abort()
-            throw Error("Gemini took too long to answer.")
-        }
-        Sleep(20)
-    }
-    return {status: r.Status, body: ResponseText(r)}
 }
 
 ; ---- "Sound when copied" (tray option, on by default) ----
@@ -279,8 +344,10 @@ ResponseText(req) {
 
 ; Joins every "text" value in Gemini's JSON reply
 JsonTextParts(json) {
+    ; "Unrolled" pattern: stays fast and safe even for very long text
+    ; (the simpler (?:a|b)* form can fail on long answers)
     out := "", pos := 1
-    while (pos := RegExMatch(json, '"text"\s*:\s*"((?:[^"\\]|\\.)*)"', &m, pos)) {
+    while (pos := RegExMatch(json, '"text"\s*:\s*"([^"\\]*+(?:\\.[^"\\]*+)*+)"', &m, pos)) {
         out .= JsonUnescape(m[1])
         pos += m.Len
     }
@@ -288,6 +355,8 @@ JsonTextParts(json) {
 }
 
 JsonUnescape(s) {
+    if !InStr(s, "\")                          ; nothing escaped: use it as it is
+        return s
     out := "", i := 1, n := StrLen(s)
     while (i <= n) {
         c := SubStr(s, i, 1)
@@ -684,6 +753,48 @@ TestKey(key) {
     }
 }
 
+; ---- "How to use" page: shown once after setup, and from the tray anytime ----
+ShowHowTo(afterSetup := false) {
+    static g := 0
+    if g {                                   ; already open: bring it to the front
+        try WinActivate("ahk_id " g.Hwnd)
+        return
+    }
+    g := Gui("-MinimizeBox", afterSetup ? "QuickNotes is ready" : "How to use QuickNotes")
+    g.BackColor := "FFFFFF", g.MarginX := 24, g.MarginY := 20
+    close := (*) => (g.Destroy(), g := 0)
+    g.OnEvent("Close", close), g.OnEvent("Escape", close)
+
+    g.SetFont("s15 bold c111827", "Segoe UI")
+    g.AddText("w440", afterSetup ? "You're all set!" : "How to use QuickNotes")
+    g.SetFont("s10 norm c4B5563")
+    g.AddText("w440 y+4", "Copy text from anything on your screen, in any language.")
+
+    ; Two "Right Alt" key caps
+    g.SetFont("s11 bold c111827")
+    g.AddText("xm+4 y+18 w116 h46 0x200 Center Border BackgroundF3F4F6", "Right Alt")
+    g.AddText("x+10 yp w116 h46 0x200 Center Border BackgroundF3F4F6", "Right Alt")
+    g.SetFont("s11 norm c2563EB")
+    g.AddText("x+14 yp w180 h46 0x200", "→  tap twice, quickly")
+
+    g.SetFont("s10 norm c111827")
+    g.AddText("xm y+18 w440", "1.   Tap Right Alt twice, quickly.")
+    g.AddText("xm y+8 w440", "2.   The screen dims. Drag over any text.")
+    g.AddText("xm y+8 w440", "3.   It's copied. Paste it anywhere with Ctrl + V.")
+    g.SetFont("s9 c6B7280")
+    g.AddText("xm y+14 w440", "Esc or right-click cancels. A single tap does nothing, so Right Alt "
+        . "keeps working normally.")
+    g.AddText("xm y+6 w440", "QuickNotes lives in the tray, next to the clock: right-click its icon "
+        . "for Pause, sound and this help.")
+
+    g.SetFont("s10 c111827")
+    tryBtn := g.AddButton("xm+226 y+18 w110 h34 Default", "Try it now")
+    tryBtn.OnEvent("Click", (*) => (close(), SetTimer(StartScan, -200)))
+    g.AddButton("x+8 yp w100 h34", "Done").OnEvent("Click", close)
+    g.Show("AutoSize")
+    try WinActivate("ahk_id " g.Hwnd)
+}
+
 ; ---- the setup window ----
 ; mode: "first" (no key yet), "change" (from the tray), "invalid" (saved key stopped working)
 class KeySetup {
@@ -911,6 +1022,7 @@ SetupTray() {
     tray.Disable(AppName)
     tray.Add()
     tray.Add("Scan text on screen", StartScan)
+    tray.Add("How to use", (*) => ShowHowTo(false))
     tray.Add()
     tray.Add("Pause", TogglePause)
     tray.Add("Start with Windows", ToggleStartup)

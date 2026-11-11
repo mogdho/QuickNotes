@@ -61,7 +61,8 @@ The first time you start QuickNotes, a small **setup window** opens by itself:
 1. Click **Open AI Studio** and sign in with your Google account.
 2. Click **Create API key** → **Copy**. The key appears in the QuickNotes window **by itself**, and the window comes back to the front (or paste it with `Ctrl + V`).
 3. Click **Test**. QuickNotes checks the key with Google: **✓ Key works** → the grey **Save** button turns on. A typo? It tells you right away, and Save stays off.
-4. Click **Save**. Done!
+4. Click **Save**.
+5. A short **"You're all set!"** page shows how to use QuickNotes. Click **Try it now** to do your first scan straight away.
 
 > 🔒 Your key is **encrypted** with your Windows account, so only you, on this PC, can read it.
 >
@@ -74,12 +75,13 @@ The first time you start QuickNotes, a small **setup window** opens by itself:
 Right-click the tray icon:
 
 <p align="center">
-  <img src="assets/tray.svg" width="90%" alt="Tray menu with Scan text on screen, Pause, Start with Windows, Sound when copied, Change Gemini API key and Exit">
+  <img src="assets/tray.svg" width="90%" alt="Tray menu with Scan text on screen, How to use, Pause, Start with Windows, Sound when copied, Change Gemini API key and Exit">
 </p>
 
 | Option | What it does |
 |:--|:--|
 | **Scan text on screen** | Same as double-tapping Right Alt. *Tip: double-click the tray icon to do this.* |
+| **How to use** | Opens a short guide with the Right Alt double-tap and a **Try it now** button |
 | **Pause** | Right Alt goes back to completely normal until you resume. The icon fades. |
 | **Start with Windows** | Starts QuickNotes automatically when you log in. Click again to turn it off. |
 | **Sound when copied** | A soft Windows notification sound when the text lands on your clipboard, so you know it's ready without looking. On by default. |
