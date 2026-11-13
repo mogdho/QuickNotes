@@ -1,7 +1,7 @@
 #Requires AutoHotkey v2.0
 ;@Ahk2Exe-SetName QuickNotes
 ;@Ahk2Exe-SetDescription QuickNotes
-;@Ahk2Exe-SetVersion 1.0.0
+;@Ahk2Exe-SetVersion 2.0.0
 ;@Ahk2Exe-SetCompanyName Mogdho Paul
 ;@Ahk2Exe-SetCopyright Mogdho Paul - MIT License
 ;@Ahk2Exe-SetMainIcon assets\icon.ico
@@ -14,18 +14,20 @@
 ;  using Google Gemini. Nothing extra to install.
 ;
 ;  DOUBLE-TAP Right Alt  -> the screen dims: drag over any text
-;                           -> it's read and copied to your clipboard.
+;  (the default shortcut)   -> it's read and copied to your clipboard.
 ;                           Esc or right-click cancels.
 ;
-;  A single tap does nothing - Right Alt keeps working normally.
+;  The shortcut can be changed (tray -> "Change shortcut…"): double-tap
+;  another key, or a key combination like Ctrl + Shift + Q.
+;  A single tap does nothing - the key keeps working normally.
 ;
-;  First scan asks for a free Gemini API key (one time only).
-;  Your snips are sent to Google Gemini to read the text.
+;  First launch opens a setup window for a free Gemini API key (one time).
+;  Only the area you select is sent to Google Gemini to read the text.
 ; ==================================================================
 
 Models        := "gemini-flash-lite-latest,gemini-flash-latest"  ; tried in order
-MagicKey      := "RAlt"
-HoldTime      := 400        ; ms - holding Right Alt longer than this isn't a "tap"
+MagicKey      := "RAlt"     ; default shortcut: double-tap Right Alt (changeable from the tray)
+HoldTime      := 400        ; ms - holding the key longer than this isn't a "tap"
 DoubleTapTime := 350        ; max ms between the two taps
 
 AppName      := "QuickNotes"
@@ -33,15 +35,20 @@ DataDir      := A_AppData "\QuickNotes"
 SettingsFile := DataDir "\settings.ini"         ; Tray options (e.g. sound on/off)
 KeyFile      := DataDir "\gemini-key.txt"       ; Encrypted for your Windows account only
 IsPaused     := false
+TryingIt     := false        ; true while the user does their first "Try it now" scan
 DownTime     := 0
 LastTap      := 0
 ScanBusy     := false
+ActiveHotkeys := []          ; the hotkeys currently switched on for the shortcut
+ShortcutHold := 0            ; > 0 while a window that needs the shortcut off is open (guide, shortcut picker)
 
 DirCreate(DataDir)
 try DirDelete(A_Temp "\QuickNotes", true)       ; Leftover from older versions (PowerShell helper)
+if (IniRead(SettingsFile, "State", "BusyCursor", "0") = "1")
+    BusyCursor(false, true)                     ; QuickNotes was closed mid-scan: give the normal cursor back
+OnExit((*) => BusyCursor(false))
 
-Hotkey("~" MagicKey, MagicDown)
-Hotkey("~" MagicKey " up", MagicUp)
+ApplyShortcut()
 SetupTray()
 
 ; First launch (no key saved yet): open the setup window right away
@@ -50,9 +57,91 @@ if (LoadKey() = "")
 
 FirstRun() {
     if (KeySetup.Ask("first") != "")
-        ShowHowTo(true)                      ; teach the Right Alt double-tap right away
+        ShowHowTo(true)                      ; teach the shortcut right away
     else
-        TrayTip("QuickNotes needs a free Gemini key to work.`nDouble-tap Right Alt to set it up.", "QuickNotes")
+        TrayTip("QuickNotes needs a free Gemini key to work.`n" ShortcutInfo().sentence " to set it up.", "QuickNotes")
+}
+
+; ================= the shortcut (double-tap a key, or a key combination) =================
+
+; Switches the shortcut off while a window needs it off (the guide page during
+; onboarding, the shortcut picker). Every PauseShortcut needs one ResumeShortcut;
+; the shortcut only comes back when ALL such windows are closed.
+PauseShortcut() {
+    global ShortcutHold += 1, LastTap := 0, DownTime := 0
+    for h in ActiveHotkeys
+        try Hotkey(h, "Off")
+}
+
+ResumeShortcut() {
+    global ShortcutHold := Max(0, ShortcutHold - 1)
+    ApplyShortcut()
+}
+
+; Sets up the shortcut saved in settings.ini (default: double-tap Right Alt).
+; It stays switched off while a window is holding it (ShortcutHold > 0).
+ApplyShortcut() {
+    global ActiveHotkeys, MagicKey, LastTap := 0, DownTime := 0
+    for h in ActiveHotkeys
+        try Hotkey(h, "Off")
+    ActiveHotkeys := []
+    onOff := ShortcutHold > 0 ? "Off" : "On"
+    if (IniRead(SettingsFile, "Shortcut", "Mode", "double") = "combo") {
+        combo := IniRead(SettingsFile, "Shortcut", "Combo", "")
+        if (combo != "") {
+            try {
+                Hotkey(combo, StartScan, onOff)
+                ActiveHotkeys.Push(combo)
+                return
+            }
+        }
+    }
+    MagicKey := IniRead(SettingsFile, "Shortcut", "Key", "RAlt")
+    Hotkey("~" MagicKey, MagicDown, onOff)
+    Hotkey("~" MagicKey " up", MagicUp, onOff)
+    ActiveHotkeys.Push("~" MagicKey, "~" MagicKey " up")
+}
+
+; The current shortcut in words and as key caps, for the help page, tray and messages
+ShortcutInfo() {
+    static names := Map("RAlt", "Right Alt", "RControl", "Right Ctrl", "LAlt", "Left Alt", "LControl", "Left Ctrl", "RShift", "Right Shift")
+    if (IniRead(SettingsFile, "Shortcut", "Mode", "double") = "combo") {
+        combo := IniRead(SettingsFile, "Shortcut", "Combo", "")
+        if (combo != "") {
+            caps := []
+            mods := RegExReplace(combo, "[^#^!+].*$")       ; just the modifier symbols at the start
+            for pair in [["#", "Win"], ["^", "Ctrl"], ["!", "Alt"], ["+", "Shift"]]   ; usual reading order
+                if InStr(mods, pair[1])
+                    caps.Push(pair[2])
+            key := RegExReplace(combo, "^[#^!+]*")
+            caps.Push(StrLen(key) = 1 ? StrUpper(key) : StrTitle(key))
+            text := ""
+            for c in caps
+                text .= (A_Index > 1 ? " + " : "") c
+            return {caps: caps, joiner: "+", hint: "press together", text: text, sentence: "Press " text, double: false}
+        }
+    }
+    k := IniRead(SettingsFile, "Shortcut", "Key", "RAlt")
+    n := names.Has(k) ? names[k] : k
+    return {caps: [n, n], joiner: "", hint: "tap twice, quickly", text: "Double-tap " n, sentence: "Double-tap " n, double: true, name: n}
+}
+
+; Shows Windows' "working in background" cursor (arrow + spinning circle) while Gemini reads.
+; Always given back: after the scan, on errors, and when QuickNotes closes.
+BusyCursor(on, force := false) {
+    static active := false
+    if (on && !active) {
+        for id in [32512, 32513, 32649] {               ; normal arrow, text I-beam, hand
+            h := DllCall("CopyImage", "ptr", DllCall("LoadCursor", "ptr", 0, "ptr", 32650, "ptr"), "uint", 2, "int", 0, "int", 0, "uint", 0, "ptr")
+            DllCall("SetSystemCursor", "ptr", h, "uint", id)
+        }
+        active := true
+        IniWrite("1", SettingsFile, "State", "BusyCursor")
+    } else if (!on && (active || force)) {
+        DllCall("SystemParametersInfo", "uint", 0x57, "uint", 0, "ptr", 0, "uint", 0)   ; reload the user's own cursors
+        active := false
+        try IniDelete(SettingsFile, "State", "BusyCursor")
+    }
 }
 
 
@@ -98,8 +187,60 @@ StartScan(*) {
     global ScanBusy
     if ScanBusy
         return
+    TryPrompt(false)                         ; the "Your turn!" card has done its job
+    SetTimer(TryPromptTimeout, 0)            ; ...and keep the "first try" message for this scan
     ScanBusy := true
     SetTimer(ScanAndCopy, -1)
+}
+
+; Draws the shortcut as key caps: [Right Alt] [Right Alt]  or  [Ctrl] + [Shift] + [Q]
+AddShortcutCaps(g, sc, firstPos) {
+    for i, cap in sc.caps {
+        g.SetFont("s11 bold c111827")
+        g.AddText((i = 1 ? firstPos : "x+8 yp") " w" Max(56, 11 * StrLen(cap) + 22) " h46 0x200 Center Border BackgroundF3F4F6", cap)
+        if (sc.joiner != "" && i < sc.caps.Length) {
+            g.SetFont("s12 bold c6B7280")
+            g.AddText("x+8 yp w14 h46 0x200 Center", sc.joiner)
+        }
+    }
+    g.SetFont("s11 norm c2563EB")
+    g.AddText("x+14 yp w170 h46 0x200", "→  " sc.hint)
+}
+
+; "Your turn!" card after "Try it now": asks the user to press the real shortcut.
+; Sits at the top of the screen without taking the keyboard focus; gone after a minute.
+TryPrompt(show := true) {
+    static g := 0
+    global TryingIt
+    if !show {
+        if g
+            try g.Destroy()
+        g := 0
+        return
+    }
+    if g
+        return
+    sc := ShortcutInfo()
+    TryingIt := true
+    g := Gui("+AlwaysOnTop +ToolWindow -Caption +Border", "QuickNotes - your turn")
+    g.BackColor := "FFFFFF", g.MarginX := 22, g.MarginY := 16
+    g.SetFont("s13 bold c111827", "Segoe UI")
+    g.AddText("w420", "Your turn! " sc.sentence (sc.double ? ", quickly." : "."))
+    AddShortcutCaps(g, sc, "xm y+12")
+    g.SetFont("s9 norm c6B7280")
+    g.AddText("xm y+12 w420", "Then drag over any text on your screen. It's copied for you.")
+    g.SetFont("s10 c111827")
+    g.AddButton("xm+330 y+8 w90 h30", "Skip").OnEvent("Click", (*) => TryPromptTimeout())
+    g.Show("Hide AutoSize")
+    g.GetPos(, , &w, &h)
+    MonitorGetWorkArea(MonitorGetPrimary(), &l, &t, &r)
+    g.Show("x" Round(l + (r - l - w) / 2) " y" (t + 40) " NoActivate")
+    SetTimer(TryPromptTimeout, -60000)
+}
+
+TryPromptTimeout() {
+    global TryingIt := false
+    TryPrompt(false)
 }
 
 ScanAndCopy() {
@@ -124,9 +265,9 @@ ScanOnce() {
     if !png
         return                               ; cancelled (Esc / right-click)
 
-    ToolTip("Reading text...")
-    result := AskGemini(png, key)
-    ToolTip()
+    BusyCursor(true)                         ; the classic "working" cursor while Gemini reads
+    try result := AskGemini(png, key)
+    finally BusyCursor(false)
 
     if (result.error != "") {
         err := result.error
@@ -148,10 +289,16 @@ ScanOnce() {
         Notify("No text found")
         return
     }
-    A_Clipboard := text
+    if !CopyToClipboard(text) {
+        MsgBox("The text was read, but another app is using the clipboard right now, "
+            . "so it couldn't be copied.`n`nPlease try the scan again.", AppName, "Icon!")
+        return
+    }
     if SoundOn()
         PlayCopiedSound()
-    Notify("Copied")
+    global TryingIt
+    Notify(TryingIt ? "Copied! That's all there is to it." : "Copied")
+    TryingIt := false
 }
 
 ; Sends the picture to Gemini and returns {text, error}
@@ -451,6 +598,7 @@ class ScanOverlay {
             0x0006, ObjBindMethod(this, "OnActivate"))     ; WM_ACTIVATE
         for msg, fn in this.handlers
             OnMessage(msg, fn)
+        this.shownAt := A_TickCount           ; set before showing: focus messages can arrive during Show
         this.gui.Show("x" this.vx " y" this.vy " w" w " h" h)
         WinActivate(this.hwnd)
 
@@ -754,15 +902,26 @@ TestKey(key) {
 }
 
 ; ---- "How to use" page: shown once after setup, and from the tray anytime ----
+; ShowHowTo("refresh") rebuilds the page if it's open (after the shortcut changed)
 ShowHowTo(afterSetup := false) {
-    static g := 0
-    if g {                                   ; already open: bring it to the front
+    static g := 0, lastAfter := false
+    refresh := false
+    if (afterSetup = "refresh") {
+        if !g
+            return
+        try g.Destroy()                      ; redraw only: the shortcut stays held
+        g := 0, afterSetup := lastAfter, refresh := true
+    } else if g {                            ; already open: bring it to the front
         try WinActivate("ahk_id " g.Hwnd)
         return
     }
+    lastAfter := afterSetup
+    if !refresh
+        PauseShortcut()                      ; read first, then use: the shortcut works once this page is closed
+    sc := ShortcutInfo()
     g := Gui("-MinimizeBox", afterSetup ? "QuickNotes is ready" : "How to use QuickNotes")
     g.BackColor := "FFFFFF", g.MarginX := 24, g.MarginY := 20
-    close := (*) => (g.Destroy(), g := 0)
+    close := (*) => (g.Destroy(), g := 0, ResumeShortcut())
     g.OnEvent("Close", close), g.OnEvent("Escape", close)
 
     g.SetFont("s15 bold c111827", "Segoe UI")
@@ -770,29 +929,149 @@ ShowHowTo(afterSetup := false) {
     g.SetFont("s10 norm c4B5563")
     g.AddText("w440 y+4", "Copy text from anything on your screen, in any language.")
 
-    ; Two "Right Alt" key caps
-    g.SetFont("s11 bold c111827")
-    g.AddText("xm+4 y+18 w116 h46 0x200 Center Border BackgroundF3F4F6", "Right Alt")
-    g.AddText("x+10 yp w116 h46 0x200 Center Border BackgroundF3F4F6", "Right Alt")
-    g.SetFont("s11 norm c2563EB")
-    g.AddText("x+14 yp w180 h46 0x200", "→  tap twice, quickly")
+    AddShortcutCaps(g, sc, "xm+4 y+18")
 
     g.SetFont("s10 norm c111827")
-    g.AddText("xm y+18 w440", "1.   Tap Right Alt twice, quickly.")
+    g.AddText("xm y+18 w440", "1.   " sc.sentence (sc.double ? ", quickly." : "."))
     g.AddText("xm y+8 w440", "2.   The screen dims. Drag over any text.")
     g.AddText("xm y+8 w440", "3.   It's copied. Paste it anywhere with Ctrl + V.")
     g.SetFont("s9 c6B7280")
-    g.AddText("xm y+14 w440", "Esc or right-click cancels. A single tap does nothing, so Right Alt "
-        . "keeps working normally.")
+    g.AddText("xm y+14 w440", "Esc or right-click cancels."
+        . (sc.double ? " A single tap does nothing, so " sc.name " keeps working normally." : ""))
     g.AddText("xm y+6 w440", "QuickNotes lives in the tray, next to the clock: right-click its icon "
-        . "for Pause, sound and this help.")
+        . "for Pause, sound, your shortcut and this help.")
 
     g.SetFont("s10 c111827")
-    tryBtn := g.AddButton("xm+226 y+18 w110 h34 Default", "Try it now")
-    tryBtn.OnEvent("Click", (*) => (close(), SetTimer(StartScan, -200)))
+    g.AddButton("xm y+18 w150 h34", "Change shortcut…").OnEvent("Click", ShortcutDialog.Open.Bind(ShortcutDialog))
+    tryBtn := g.AddButton("x+76 yp w110 h34 Default", "Try it now")
+    tryBtn.OnEvent("Click", (*) => (close(), TryPrompt()))     ; the user presses the real shortcut
     g.AddButton("x+8 yp w100 h34", "Done").OnEvent("Click", close)
     g.Show("AutoSize")
     try WinActivate("ahk_id " g.Hwnd)
+}
+
+; ---- "Choose your shortcut" window (from the guide page and the tray) ----
+class ShortcutDialog {
+    static g := 0
+    static keys := ["RAlt", "RControl", "LAlt", "LControl", "RShift"]
+    static labels := ["Right Alt", "Right Ctrl", "Left Alt", "Left Ctrl", "Right Shift"]
+
+    static Open(*) {
+        if ShortcutDialog.g {                ; already open: bring it to the front
+            try WinActivate("ahk_id " ShortcutDialog.g.Hwnd)
+            return
+        }
+        ShortcutDialog().Build()
+    }
+
+    Build() {
+        mode := IniRead(SettingsFile, "Shortcut", "Mode", "double")
+        key := IniRead(SettingsFile, "Shortcut", "Key", "RAlt")
+        combo := IniRead(SettingsFile, "Shortcut", "Combo", "")
+        g := Gui("-MinimizeBox", "Choose your shortcut")
+        ShortcutDialog.g := g
+        g.BackColor := "FFFFFF", g.MarginX := 22, g.MarginY := 18
+        ; While choosing, the current shortcut is off (pressing keys here must not start a scan).
+        ; Closing the window in any way switches the saved shortcut back on.
+        PauseShortcut()
+        this.close := (*) => (g.Destroy(), ShortcutDialog.g := 0, ResumeShortcut())
+        g.OnEvent("Close", this.close), g.OnEvent("Escape", this.close)
+
+        g.SetFont("s14 bold c111827", "Segoe UI")
+        g.AddText("w400", "Choose your shortcut")
+        g.SetFont("s10 norm c4B5563")
+        g.AddText("w400 y+4", "How do you want to start a scan? Pick what's easy on your keyboard.")
+
+        g.SetFont("s10 bold c111827")
+        this.r1 := g.AddRadio("xm y+16" (mode != "combo" ? " Checked" : ""), "Tap a key twice, quickly")
+        g.SetFont("norm")
+        idx := 1
+        for i, k in ShortcutDialog.keys
+            if (k = key)
+                idx := i
+        this.ddl := g.AddDropDownList("xm+22 y+6 w180 Choose" idx, ShortcutDialog.labels)
+
+        g.SetFont("bold")
+        this.r2 := g.AddRadio("xm y+18" (mode = "combo" ? " Checked" : ""), "Press a key combination")
+        g.SetFont("norm")
+        this.hk := g.AddHotkey("xm+22 y+6 w180 h26", RegExReplace(combo, "#"))
+        this.win := g.AddCheckbox("x+12 yp+4" (InStr(combo, "#") ? " Checked" : ""), "with Win key")
+        g.SetFont("s9 c6B7280")
+        g.AddText("xm+22 y+10 w380", "Click the box, then press your keys, e.g. Ctrl + Shift + Q.")
+
+        g.SetFont("s10 c6B7280")
+        this.status := g.AddText("xm y+12 w400 h20", "")
+        g.SetFont("s10 c111827")
+        g.AddButton("xm y+10 w130 h32", "Reset to default").OnEvent("Click", (*) => this.Reset())
+        g.AddButton("xm+212 yp w90 h32 Default", "Save").OnEvent("Click", (*) => this.Save())
+        g.AddButton("x+8 yp w90 h32", "Cancel").OnEvent("Click", this.close)
+
+        ; The two options are in separate rows, so keep exactly one of them selected
+        this.r1.OnEvent("Click", (*) => this.r2.Value := 0)
+        this.r2.OnEvent("Click", (*) => this.r1.Value := 0)
+        this.ddl.OnEvent("Change", (*) => (this.r1.Value := 1, this.r2.Value := 0))
+        this.hk.OnEvent("Change", (*) => (this.r2.Value := 1, this.r1.Value := 0))
+        this.win.OnEvent("Click", (*) => (this.r2.Value := 1, this.r1.Value := 0))
+        g.Show("AutoSize")
+        try WinActivate("ahk_id " g.Hwnd)
+    }
+
+    Say(text, color := "DC2626") {
+        this.status.SetFont("c" color)
+        this.status.Value := text
+    }
+
+    Reset() {
+        this.r1.Value := 1, this.r2.Value := 0, this.ddl.Choose(1)
+        this.Save()
+    }
+
+    Save() {
+        if this.r1.Value {
+            IniWrite("double", SettingsFile, "Shortcut", "Mode")
+            IniWrite(ShortcutDialog.keys[this.ddl.Value], SettingsFile, "Shortcut", "Key")
+        } else {
+            hk := this.hk.Value
+            if (hk = "") {
+                this.Say("Click the box and press your keys first.")
+                return
+            }
+            combo := (this.win.Value ? "#" : "") hk
+            ; Needs Ctrl/Alt/Shift/Win (or an F-key), so normal typing keeps working
+            if !RegExMatch(combo, "^[#^!+]+.") && !RegExMatch(hk, "i)^F([1-9]|1\d|2[0-4])$") {
+                this.Say("Add Ctrl, Alt, Shift or Win, so normal typing still works.")
+                return
+            }
+            if RegExMatch(combo, "i)^\^[acvxzyswpfn]$") {
+                this.Say("That's a common shortcut (like copy or paste). Please pick another.")
+                return
+            }
+            ; Windows' own Win shortcuts: Win + L can never be taken over, and taking
+            ; the others (Win + D, Win + E...) would stop them doing their usual job
+            if RegExMatch(combo, "i)^#[a-z0-9]$") || RegExMatch(combo, "i)^(\^!|!\^)(Delete|Del)$") {
+                this.Say("Windows already uses that shortcut. Add Ctrl, Alt or Shift, or pick another.")
+                return
+            }
+            ; Ctrl + Alt types special letters on many keyboards (AltGr), e.g. Ctrl + Alt + E
+            if RegExMatch(combo, "^[\^!]{2}[^\^!#+]") && InStr(combo, "^") && InStr(combo, "!") {
+                this.Say("Ctrl + Alt types special letters on some keyboards. Add Shift or Win.")
+                return
+            }
+            try {
+                Hotkey(combo, (*) => 0, "On"), Hotkey(combo, "Off")
+            } catch {
+                this.Say("That shortcut can't be used. Please try another.")
+                return
+            }
+            IniWrite("combo", SettingsFile, "Shortcut", "Mode")
+            IniWrite(combo, SettingsFile, "Shortcut", "Combo")
+        }
+        ApplyShortcut()
+        UpdateTray()
+        ShowHowTo("refresh")
+        this.close()
+        Notify("Shortcut saved: " ShortcutInfo().text)
+    }
 }
 
 ; ---- the setup window ----
@@ -999,7 +1278,24 @@ GuidBuffer(str) {
 
 Notify(msg) {
     ToolTip(msg)
-    SetTimer(() => ToolTip(), -1500)
+    SetTimer(NotifyHide, -1500)               ; one named timer: a new message always gets its full 1.5 s
+}
+
+NotifyHide() => ToolTip()
+
+; Puts text on the clipboard. Another app can hold the clipboard for a moment
+; (clipboard managers, remote desktop), so retry briefly instead of failing.
+; Each attempt already waits up to ~1 s inside AutoHotkey, so 3 tries is about 3 s at most.
+CopyToClipboard(text) {
+    loop 3 {
+        try {
+            A_Clipboard := text
+            if (A_Clipboard == text)
+                return true
+        }
+        Sleep(100)
+    }
+    return false
 }
 
 
@@ -1023,6 +1319,7 @@ SetupTray() {
     tray.Add()
     tray.Add("Scan text on screen", StartScan)
     tray.Add("How to use", (*) => ShowHowTo(false))
+    tray.Add("Change shortcut…", ShortcutDialog.Open.Bind(ShortcutDialog))
     tray.Add()
     tray.Add("Pause", TogglePause)
     tray.Add("Start with Windows", ToggleStartup)
@@ -1037,7 +1334,7 @@ SetupTray() {
 
 UpdateTray() {
     RefreshIcon()
-    A_IconTip := AppName (IsPaused ? " (paused)" : " - double-tap Right Alt to scan")
+    A_IconTip := AppName (IsPaused ? " (paused)" : " - " ShortcutInfo().text " to scan")
     if IsPaused
         A_TrayMenu.Check("Pause")
     else

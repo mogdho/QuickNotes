@@ -15,7 +15,8 @@
 
 | You press | What happens |
 |:--|:--|
-| `Right Alt` **twice quickly** | 🔲 The screen **dims**. Drag over any text (that area clears) → it's **read and copied** |
+| `Right Alt` **twice quickly** *(default)* | 🔲 The screen **dims**. Drag over any text (that area clears) → it's **read and copied** |
+| **Your own shortcut** | No Right Alt key? Pick another key to double-tap, or a combination like `Ctrl + Shift + Q`: tray → **Change shortcut…** |
 | `Esc` or **right-click** | Cancels the scan |
 | `Right Alt` **once** | Nothing: Right Alt keeps working normally (AltGr typing too) |
 
@@ -25,7 +26,7 @@ Then just paste (`Ctrl + V`) wherever you want.
 
 | Pop-up | Meaning |
 |:--|:--|
-| **Reading text...** | Gemini is reading your selection |
+| ⏳ *loading cursor* | Gemini is reading your selection (Windows' "working" cursor, back to normal when done) |
 | **Copied** | ✅ Done: the text is on your clipboard (with a soft sound, unless you turned it off) |
 | **No text found** | Gemini found no text in your selection |
 
@@ -75,13 +76,14 @@ The first time you start QuickNotes, a small **setup window** opens by itself:
 Right-click the tray icon:
 
 <p align="center">
-  <img src="assets/tray.svg" width="90%" alt="Tray menu with Scan text on screen, How to use, Pause, Start with Windows, Sound when copied, Change Gemini API key and Exit">
+  <img src="assets/tray.svg" width="90%" alt="Tray menu with Scan text on screen, How to use, Change shortcut, Pause, Start with Windows, Sound when copied, Change Gemini API key and Exit">
 </p>
 
 | Option | What it does |
 |:--|:--|
 | **Scan text on screen** | Same as double-tapping Right Alt. *Tip: double-click the tray icon to do this.* |
-| **How to use** | Opens a short guide with the Right Alt double-tap and a **Try it now** button |
+| **How to use** | Opens a short guide with your shortcut and a **Try it now** button |
+| **Change shortcut…** | Pick a key to double-tap (Right Alt, Right Ctrl, Left Alt, Left Ctrl, Right Shift) or **press your own key combination**. Also on the guide page. |
 | **Pause** | Right Alt goes back to completely normal until you resume. The icon fades. |
 | **Start with Windows** | Starts QuickNotes automatically when you log in. Click again to turn it off. |
 | **Sound when copied** | A soft Windows notification sound when the text lands on your clipboard, so you know it's ready without looking. On by default. |
@@ -126,6 +128,7 @@ flowchart TD
 | Problem | Fix |
 |:--|:--|
 | Double-tap does nothing | Check the tray icon is there and not faded (paused). Tap a little faster. |
+| My keyboard has no Right Alt | Tray → **Change shortcut…** and pick another key or a key combination. |
 | "Your saved key stopped working" | The setup window opens by itself: paste a new key from AI Studio. |
 | "You've hit Google's free limit" | The free tier allows a limited number of scans per minute. Wait a minute. |
 | Reads the wrong text | Drag a tighter box around just the text you want. |
